@@ -9,8 +9,10 @@ export const DESK_HOST = "127.0.0.1";
 export const DESK_PORT = 47221;
 export const WEB_ORIGIN = "http://127.0.0.1:47223";
 
+export const PAPER_STARTING_EQUITY = 10_000;
+
 export const RESEARCH_ACCOUNT: AccountState = {
-  equity: 10_000,
+  equity: PAPER_STARTING_EQUITY,
   availableMargin: 10_000,
   grossExposure: 0,
   dailyRealizedLoss: 0,

@@ -13,8 +13,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Aster research desk",
-  description: "Live BTC and ETH perpetual research. No orders are placed in this mode.",
+  title: "Aster paper desk",
+  description: "Paper trades on live Aster perpetual prices. No exchange orders are placed.",
 };
 
 export default function RootLayout({

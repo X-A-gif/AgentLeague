@@ -49,6 +49,28 @@ type SymbolView = {
   error: string | null;
 };
 
+type PaperPosition = {
+  symbol: string;
+  side: "LONG" | "SHORT";
+  qty: number;
+  entryPrice: number;
+  mark: number | null;
+  leverage: number;
+  unrealizedPnl: number;
+  fees: number;
+  funding: number;
+};
+
+type PaperOrder = {
+  symbol: string;
+  positionSide: "LONG" | "SHORT";
+  type: string;
+  qty: number;
+  stopPrice: number | null;
+  limitPrice: number | null;
+  status: string;
+};
+
 type Snapshot = {
   mode: string;
   ordersEnabled: boolean;
@@ -56,6 +78,19 @@ type Snapshot = {
   updatedAt: number | null;
   hypotheticalEquity: number;
   equityNote: string;
+  paper?: {
+    equity: number;
+    unrealizedPnl: number;
+    realizedPnl: number;
+    fees: number;
+    funding: number;
+    slippageBps: number;
+    takerFeeRate: number;
+    makerFeeRate: number;
+    positions: PaperPosition[];
+    orders: PaperOrder[];
+    note: string;
+  };
   limits: { version: number; values: Record<string, number> } | null;
   symbols: SymbolView[];
   error: string | null;
@@ -124,15 +159,15 @@ export function ResearchBoard() {
       <header className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
         <div>
           <p className="font-mono text-xs tracking-[0.18em] text-muted-foreground uppercase">Aster perpetuals</p>
-          <h1 className="mt-1 text-3xl font-semibold tracking-tight">Research desk</h1>
+          <h1 className="mt-1 text-3xl font-semibold tracking-tight">Paper desk</h1>
           <p className="mt-2 max-w-2xl text-sm text-muted-foreground">
-            BTCUSDT and ETHUSDT, 15-minute decision cycle. Setups and risk sizes are calculated here and written to
-            the log. Nothing is sent to Aster except public market data.
+            BTCUSDT and ETHUSDT. Approved 15-minute setups become simulated positions on the live Aster book. Nothing
+            is sent to Aster except public market data.
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
-          <Badge>Research</Badge>
-          <Badge variant="outline">Orders disabled</Badge>
+          <Badge>Paper</Badge>
+          <Badge variant="outline">Aster orders disabled</Badge>
           <Badge variant="secondary">Head trader off</Badge>
         </div>
       </header>
@@ -148,21 +183,24 @@ export function ResearchBoard() {
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Hypothetical sizing book</CardTitle>
-          <CardDescription>{snapshot.equityNote}</CardDescription>
+          <CardTitle className="text-base">Paper book</CardTitle>
+          <CardDescription>{snapshot.paper?.note ?? snapshot.equityNote}</CardDescription>
         </CardHeader>
-        <CardContent className="flex flex-col gap-3">
-          <p className="font-mono text-2xl">{money(snapshot.hypotheticalEquity)} USDT</p>
+        <CardContent className="flex flex-col gap-4">
+          <p className="font-mono text-2xl">{money(snapshot.paper?.equity ?? snapshot.hypotheticalEquity)} USDT</p>
           <div className="flex flex-wrap gap-2 text-xs">
+            <Limit label="Unrealized" value={signed(snapshot.paper?.unrealizedPnl)} />
+            <Limit label="Realized" value={signed(snapshot.paper?.realizedPnl)} />
+            <Limit label="Fees" value={signed(snapshot.paper ? -snapshot.paper.fees : undefined)} />
+            <Limit label="Funding" value={signed(snapshot.paper?.funding)} />
             <Limit label="Max leverage" value={`${snapshot.limits?.values.maxLeverage ?? "—"}x`} />
             <Limit label="Risk / trade" value={percent(snapshot.limits?.values.riskPerTrade)} />
-            <Limit label="Min R:R" value={snapshot.limits?.values.minRewardRisk?.toString() ?? "—"} />
-            <Limit label="Daily loss halt" value={percent(snapshot.limits?.values.maxDailyLossPct)} />
             <Limit
               label="Updated"
               value={snapshot.updatedAt ? new Date(snapshot.updatedAt).toLocaleTimeString() : "waiting"}
             />
           </div>
+          <PaperLists paper={snapshot.paper} />
         </CardContent>
       </Card>
 
@@ -252,7 +290,7 @@ function SymbolCard({ view }: { view: SymbolView }) {
                   Reference entry {priceFmt(decision.ticket.entry)}, stop {priceFmt(decision.ticket.stop)}, target{" "}
                   {priceFmt(decision.ticket.targets[0] ?? 0)}.
                   {decision.risk.action === "approve"
-                    ? ` Hypothetical size ${decision.risk.qty} at ${decision.risk.leverage}x.`
+                    ? ` Paper size ${decision.risk.qty} at ${decision.risk.leverage}x.`
                     : ` ${decision.risk.reason}.`}
                 </p>
                 <p className="mt-1 text-xs text-muted-foreground">{decision.headNote}</p>
@@ -263,6 +301,41 @@ function SymbolCard({ view }: { view: SymbolView }) {
         <p className="text-xs text-muted-foreground">{view.pass?.news.summary}</p>
       </CardContent>
     </Card>
+  );
+}
+
+function PaperLists({ paper }: { paper: Snapshot["paper"] }) {
+  if (!paper || (paper.positions.length === 0 && paper.orders.length === 0)) {
+    return (
+      <p className="text-sm text-muted-foreground">
+        No paper position yet. The next approved 15-minute setup opens one. Until then this book stays flat.
+      </p>
+    );
+  }
+  return (
+    <div className="flex flex-col gap-3">
+      {paper.positions.map((position) => (
+        <div key={`${position.symbol}-${position.side}`} className="rounded-md border p-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge variant={position.side === "LONG" ? "default" : "destructive"}>{position.side}</Badge>
+            <span className="text-sm font-medium">{position.symbol}</span>
+            <span className="font-mono text-sm">{position.qty}</span>
+            <span className="text-xs text-muted-foreground">{position.leverage}x paper</span>
+          </div>
+          <p className="mt-2 text-sm">
+            Entry {priceFmt(position.entryPrice)} · mark {position.mark === null ? "—" : priceFmt(position.mark)} ·
+            unrealized {signed(position.unrealizedPnl)}
+          </p>
+        </div>
+      ))}
+      {paper.orders.map((order, index) => (
+        <p key={`${order.symbol}-${order.type}-${index}`} className="font-mono text-xs text-muted-foreground">
+          Resting {order.type.replaceAll("_", " ").toLowerCase()} {order.positionSide} {order.symbol} qty {order.qty}
+          {order.stopPrice !== null ? ` at ${priceFmt(order.stopPrice)}` : ""}
+          {order.limitPrice !== null ? ` limit ${priceFmt(order.limitPrice)}` : ""}
+        </p>
+      ))}
+    </div>
   );
 }
 
@@ -310,6 +383,14 @@ function priceFmt(value: number): string {
 function num(value: number | null | undefined): string {
   if (value === null || value === undefined || Number.isNaN(value)) return "—";
   return value.toLocaleString("en-US", { maximumFractionDigits: 2 });
+}
+
+function signed(value: number | null | undefined): string {
+  if (value === null || value === undefined || Number.isNaN(value)) return "—";
+  const formatted = Math.abs(value).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  if (value > 0) return `+${formatted}`;
+  if (value < 0) return `-${formatted}`;
+  return formatted;
 }
 
 function percent(value: number | undefined): string {

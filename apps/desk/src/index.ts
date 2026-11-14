@@ -7,7 +7,7 @@ const desk = new ResearchDesk(log);
 startServer(desk, log);
 
 console.log(`Research desk listening on http://${DESK_HOST}:${DESK_PORT}`);
-console.log("Mode: research. Orders are not implemented in this process.");
+console.log("Mode: paper. Aster orders are not implemented in this process.");
 
 desk.start().catch((error: unknown) => {
   console.error(error instanceof Error ? error.message : error);

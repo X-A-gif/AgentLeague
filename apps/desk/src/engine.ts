@@ -8,8 +8,9 @@ import {
   type SymbolFilters,
 } from "@aster/client";
 import WebSocket from "ws";
-import { INTERVALS, RESEARCH_ACCOUNT, SYMBOLS, restBase, standDown, wsBase } from "./config.js";
+import { INTERVALS, SYMBOLS, dataFile, restBase, standDown, wsBase } from "./config.js";
 import { DecisionLog } from "./log.js";
+import { PaperBook, type PaperView } from "./paperBook.js";
 import { runResearch, type Quote, type ResearchPass } from "./research.js";
 
 export type SymbolView = {
@@ -22,12 +23,13 @@ export type SymbolView = {
 };
 
 export type DeskSnapshot = {
-  mode: "research";
+  mode: "paper";
   ordersEnabled: false;
   headTrader: "disabled";
   updatedAt: number | null;
   hypotheticalEquity: number;
   equityNote: string;
+  paper: PaperView;
   limits: { version: number; values: Record<string, number> } | null;
   rateLimits: Array<{ rateLimitType: string; interval: string; intervalNum: number; limit: number }>;
   symbols: SymbolView[];
@@ -39,6 +41,7 @@ type Books = Record<Interval, Candle[]>;
 export class ResearchDesk {
   readonly client: PublicAsterClient;
   readonly log: DecisionLog;
+  private readonly paper: PaperBook;
   private readonly filters = new Map<string, SymbolFilters>();
   private readonly quotes = new Map<string, Quote>();
   private readonly lastPrice = new Map<string, number>();
@@ -52,21 +55,23 @@ export class ResearchDesk {
   private stopped = false;
   private reconnectDelay = 1_000;
 
-  constructor(log: DecisionLog, client = new PublicAsterClient(restBase())) {
+  constructor(log: DecisionLog, client = new PublicAsterClient(restBase()), filename = dataFile()) {
     this.log = log;
     this.client = client;
+    this.paper = new PaperBook(filename);
   }
 
   snapshot(): DeskSnapshot {
     const limits = this.log.activeLimits();
+    const paper = this.paper.view(this.marks());
     return {
-      mode: "research",
+      mode: "paper",
       ordersEnabled: false,
       headTrader: "disabled",
       updatedAt: this.updatedAt,
-      hypotheticalEquity: RESEARCH_ACCOUNT.equity,
-      equityNote:
-        "Hypothetical equity used only so the risk engine can show the size it would choose. This is not an Aster balance.",
+      hypotheticalEquity: paper.equity,
+      equityNote: paper.note,
+      paper,
       limits: limits ? { version: limits.id, values: limits.limits } : null,
       rateLimits: this.rateLimits,
       symbols: SYMBOLS.map((symbol) => ({
@@ -138,6 +143,7 @@ export class ResearchDesk {
         bid: current?.bid ?? Number(event.p),
         ask: current?.ask ?? Number(event.p),
       });
+      this.applyQuote(symbol);
     } else if (event.e === "bookTicker") {
       const symbol = String(event.s);
       const current = this.quotes.get(symbol);
@@ -169,7 +175,6 @@ export class ResearchDesk {
       this.rateLimits = info.rateLimits;
       for (const symbol of info.symbols) this.filters.set(symbol.symbol, symbol);
       const now = Date.now();
-      let exposure = 0;
       const limits = this.log.activeLimits();
       if (!limits) throw new Error("Risk limits are not confirmed");
       for (const symbol of SYMBOLS) {
@@ -198,13 +203,13 @@ export class ResearchDesk {
           candles: books,
           limits: limits.limits,
           limitVersion: limits.id,
-          account: { ...RESEARCH_ACCOUNT, grossExposure: exposure },
+          account: this.paper.accountState(this.marks(), now),
           now,
           standDown: standDown(),
         });
-        exposure = pass.exposureAfter;
         this.passes.set(symbol, pass);
-        this.record(pass, reason, now);
+        this.record(pass, reason, now, filters, quote);
+        this.applyQuote(symbol);
       }
       this.updatedAt = now;
       this.error = null;
@@ -232,7 +237,38 @@ export class ResearchDesk {
     return Object.fromEntries(entries) as Books;
   }
 
-  private record(pass: ResearchPass, reason: string, now: number): void {
+  private marks(): Record<string, number> {
+    return Object.fromEntries([...this.quotes].map(([symbol, quote]) => [symbol, quote.mark]));
+  }
+
+  private applyQuote(symbol: string): void {
+    const quote = this.quotes.get(symbol);
+    if (!quote) return;
+    const actions = this.paper.onQuote(
+      symbol,
+      { mark: quote.mark, fundingRate: quote.fundingRate, nextFundingTime: quote.nextFundingTime },
+      Date.now(),
+    );
+    for (const action of actions) {
+      this.log.append({
+        ts: Date.now(),
+        agent: "execution",
+        kind: action.kind === "reject" || action.kind === "skip" ? "observation" : "fill",
+        correlationId: null,
+        parentIds: [],
+        payload: { summary: action.summary, ...action.payload },
+      });
+    }
+    if (actions.length > 0) this.updatedAt = Date.now();
+  }
+
+  private record(
+    pass: ResearchPass,
+    reason: string,
+    now: number,
+    filters: SymbolFilters,
+    quote: Quote,
+  ): void {
     const correlationId = pass.candleOpenTime ? `${pass.symbol}-15m-${pass.candleOpenTime}` : null;
     if (correlationId && this.log.hasCorrelation(correlationId)) return;
     const market = this.log.append({
@@ -291,7 +327,7 @@ export class ResearchDesk {
         payload: {
           summary:
             decision.risk.action === "approve"
-              ? `Would approve ${decision.risk.qty} ${decision.ticket.symbol} at ${decision.risk.leverage}x. Hypothetical, not sent.`
+              ? `Approved a paper size of ${decision.risk.qty} ${decision.ticket.symbol} at ${decision.risk.leverage}x. No Aster order.`
               : `Would reject: ${decision.risk.reason}`,
           action: decision.risk.action,
           reason: decision.risk.reason,
@@ -311,6 +347,31 @@ export class ResearchDesk {
         parentIds: [risk.id],
         payload: { summary: decision.headNote, status: "disabled", qty: decision.headQty },
       });
+      if (decision.risk.action === "approve" && decision.headQty && decision.headQty > 0 && decision.risk.leverage) {
+        const target = decision.ticket.targets[0];
+        if (target === undefined) continue;
+        const action = this.paper.submitApproved({
+          symbol: decision.ticket.symbol,
+          side: decision.ticket.side,
+          qty: decision.headQty,
+          leverage: decision.risk.leverage,
+          stop: decision.ticket.stop,
+          target,
+          bid: quote.bid,
+          ask: quote.ask,
+          filters,
+          now,
+          setup: decision.ticket.setup,
+        });
+        this.log.append({
+          ts: now,
+          agent: "execution",
+          kind: action.kind === "fill" ? "fill" : "observation",
+          correlationId,
+          parentIds: [risk.id],
+          payload: { summary: action.summary, ...action.payload },
+        });
+      }
     }
   }
 }

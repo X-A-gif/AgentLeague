@@ -10,11 +10,11 @@ export function startServer(desk: ResearchDesk, log: DecisionLog): http.Server {
     response.setHeader("Cache-Control", "no-store");
     if (request.method !== "GET") {
       response.writeHead(405, { "Content-Type": "application/json" });
-      response.end(JSON.stringify({ error: "Only GET is served in research mode." }));
+      response.end(JSON.stringify({ error: "Only GET is served. This desk does not accept order requests." }));
       return;
     }
     if (url.pathname === "/health") {
-      send(response, 200, { ok: true, mode: "research", ordersEnabled: false });
+      send(response, 200, { ok: true, mode: "paper", ordersEnabled: false });
       return;
     }
     if (url.pathname === "/snapshot") {

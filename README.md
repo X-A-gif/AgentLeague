@@ -1,6 +1,6 @@
 # Aster research desk
 
-A single-operator desk for Aster USDT-margined perpetuals. This build is **research mode only**. It reads public market data for BTCUSDT and ETHUSDT, calculates indicators, writes an append-only decision log, and shows what the risk engine would do. It does not connect a wallet and it cannot place, cancel, transfer, or withdraw.
+A single-operator desk for Aster USDT-margined perpetuals. This build researches BTCUSDT and ETHUSDT and, when a setup passes the risk check, simulates the trade on live prices. It does not connect a wallet and it cannot place, cancel, transfer, or withdraw on Aster.
 
 The design is in [docs/DESIGN.md](docs/DESIGN.md). Verified API notes are in [docs/ASTER_API_NOTES.md](docs/ASTER_API_NOTES.md).
 
