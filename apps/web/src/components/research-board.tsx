@@ -79,6 +79,24 @@ type Snapshot = {
   updatedAt: number | null;
   hypotheticalEquity: number;
   equityNote: string;
+  league?: {
+    pool: number;
+    teamCapital: number;
+    equity: number;
+    teams: Array<{
+      id: string;
+      name: string;
+      mandate: string;
+      strategyId: string;
+      strategyVersion: number;
+      equity: number;
+      startingEquity: number;
+      unrealizedPnl: number;
+      positions: PaperPosition[];
+      orders: PaperOrder[];
+      lastSummary: string;
+    }>;
+  };
   paper?: {
     equity: number;
     unrealizedPnl: number;
@@ -161,10 +179,10 @@ export function ResearchBoard() {
       <header className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
         <div>
           <p className="font-mono text-xs tracking-[0.18em] text-muted-foreground uppercase">Aster perpetuals</p>
-          <h1 className="mt-1 text-3xl font-semibold tracking-tight">Paper desk</h1>
+          <h1 className="mt-1 text-3xl font-semibold tracking-tight">AI Trading League</h1>
           <p className="mt-2 max-w-2xl text-sm text-muted-foreground">
-            BTCUSDT and ETHUSDT. Approved 15-minute setups become simulated positions on the live Aster book. Nothing
-            is sent to Aster except public market data.
+            Five paper teams share BTCUSDT and ETHUSDT, the same 2,000 USDT book, the same costs, and the same risk
+            veto. They do not see each other’s decisions. Nothing is sent to Aster except public market data.
           </p>
         </div>
         <div className="flex flex-col items-start gap-3">
@@ -197,9 +215,42 @@ export function ResearchBoard() {
         </Card>
       ) : null}
 
+      {snapshot.league ? (
+        <section className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+          {snapshot.league.teams.map((team) => (
+            <Card key={team.id}>
+              <CardHeader>
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <CardTitle>{team.name}</CardTitle>
+                    <CardDescription>
+                      {team.strategyId} v{team.strategyVersion}. {team.mandate}
+                    </CardDescription>
+                  </div>
+                  <Badge variant="outline">{money(team.equity)}</Badge>
+                </div>
+              </CardHeader>
+              <CardContent className="flex flex-col gap-2">
+                <p className="text-sm">{team.lastSummary}</p>
+                {team.positions.length === 0 ? (
+                  <p className="text-xs text-muted-foreground">No open paper position. Allocated {money(team.startingEquity)}.</p>
+                ) : (
+                  team.positions.map((position) => (
+                    <p key={`${team.id}-${position.symbol}-${position.side}`} className="font-mono text-xs">
+                      {position.side} {position.qty} {position.symbol} @ {priceFmt(position.entryPrice)} uPnL{" "}
+                      {signed(position.unrealizedPnl)}
+                    </p>
+                  ))
+                )}
+              </CardContent>
+            </Card>
+          ))}
+        </section>
+      ) : null}
+
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Paper book</CardTitle>
+          <CardTitle className="text-base">Paper pool</CardTitle>
           <CardDescription>{snapshot.paper?.note ?? snapshot.equityNote}</CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-4">

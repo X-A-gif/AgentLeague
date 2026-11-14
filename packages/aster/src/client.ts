@@ -20,6 +20,14 @@ export class AsterHttpError extends Error {
 
 type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 
+function parseLevels(value: unknown): Array<[number, number]> {
+  if (!Array.isArray(value)) return [];
+  return value.map((level) => {
+    if (!Array.isArray(level) || level.length < 2) throw new Error("Depth level was malformed");
+    return [Number(level[0]), Number(level[1])] as [number, number];
+  });
+}
+
 /**
  * Public market-data client. Every request is GET.
  * There is no order, cancel, transfer, or withdraw method.
@@ -60,6 +68,14 @@ export class PublicAsterClient {
 
   async bookTicker(symbol: string): Promise<BookTicker> {
     return parseBookTicker(await this.getJson("/fapi/v3/ticker/bookTicker", { symbol }));
+  }
+
+  /** Public order book. Documented `GET /fapi/v3/depth`. Quantities are contracts, not a liquidity-cluster feed. */
+  async depth(symbol: string, limit = 20): Promise<{ bids: Array<[number, number]>; asks: Array<[number, number]> }> {
+    const body = await this.getJson("/fapi/v3/depth", { symbol, limit: String(limit) });
+    if (!body || typeof body !== "object") throw new Error("Depth response was not an object");
+    const book = body as { bids?: unknown; asks?: unknown };
+    return { bids: parseLevels(book.bids), asks: parseLevels(book.asks) };
   }
 
   private async getJson(path: string, query?: Record<string, string>): Promise<unknown> {

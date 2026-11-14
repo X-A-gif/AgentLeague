@@ -105,6 +105,7 @@ describe("PublicAsterClient", () => {
     expect(Object.getOwnPropertyNames(Object.getPrototypeOf(client)).sort()).toEqual([
       "bookTicker",
       "constructor",
+      "depth",
       "exchangeInfo",
       "getJson",
       "klines",

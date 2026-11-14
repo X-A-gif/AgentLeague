@@ -13,8 +13,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Aster paper desk",
-  description: "Paper trades on live Aster perpetual prices. No exchange orders are placed.",
+  title: "AI Trading League",
+  description: "Five paper trading teams on live Aster perpetual prices. No exchange orders are placed.",
 };
 
 export default function RootLayout({

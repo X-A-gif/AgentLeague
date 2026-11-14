@@ -110,8 +110,10 @@ const NOTE =
 
 export class PaperBook {
   private readonly db: DatabaseSync;
+  private readonly startingEquity: number;
 
-  constructor(filename: string) {
+  constructor(filename: string, startingEquity = PAPER_STARTING_EQUITY) {
+    this.startingEquity = startingEquity;
     this.db = new DatabaseSync(filename);
     this.db.exec("PRAGMA journal_mode = WAL;");
     this.db.exec(`
@@ -168,7 +170,7 @@ export class PaperBook {
           `INSERT INTO paper_account (id, starting_equity, peak_equity, day_key, day_net, consecutive_losses)
            VALUES (1, ?, ?, ?, 0, 0)`,
         )
-        .run(PAPER_STARTING_EQUITY, PAPER_STARTING_EQUITY, utcDay(Date.now()));
+        .run(this.startingEquity, this.startingEquity, utcDay(Date.now()));
     }
     const control = this.db.prepare("SELECT id FROM desk_control WHERE id = 1").get();
     if (!control) {
@@ -200,9 +202,10 @@ export class PaperBook {
     const realizedPnl = this.sum("realized_pnl");
     const fees = this.sum("fees");
     const funding = this.sum("funding");
-    const equity = PAPER_STARTING_EQUITY + realizedPnl + funding - fees + unrealizedPnl;
+    const startingEquity = this.account().startingEquity;
+    const equity = startingEquity + realizedPnl + funding - fees + unrealizedPnl;
     return {
-      startingEquity: PAPER_STARTING_EQUITY,
+      startingEquity,
       equity,
       unrealizedPnl,
       realizedPnl,

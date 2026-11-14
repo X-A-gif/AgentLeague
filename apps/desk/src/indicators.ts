@@ -1,4 +1,4 @@
-import { BollingerBands, EMA, MACD, RSI, SMA } from "technicalindicators";
+import { ADX, ATR, BollingerBands, EMA, MACD, RSI, SMA } from "technicalindicators";
 import type { Candle } from "@aster/client";
 
 export function closesOf(candles: Candle[]): number[] {
@@ -60,6 +60,30 @@ export function sessionVwap(candles: Candle[], now: number): { vwap: number; par
 export function lastRsi(candles: Candle[]): number | null {
   const series = rsiSeries(closesOf(candles));
   return series.at(-1) ?? null;
+}
+
+export function averageTrueRange(candles: Candle[], period = 14): number | null {
+  if (candles.length < period + 1) return null;
+  const rows = ATR.calculate({
+    period,
+    high: candles.map((candle) => candle.high),
+    low: candles.map((candle) => candle.low),
+    close: candles.map((candle) => candle.close),
+  });
+  const last = rows.at(-1);
+  return last !== undefined && Number.isFinite(last) ? last : null;
+}
+
+export function averageDirectionalIndex(candles: Candle[], period = 14): number | null {
+  if (candles.length < period * 2) return null;
+  const rows = ADX.calculate({
+    period,
+    high: candles.map((candle) => candle.high),
+    low: candles.map((candle) => candle.low),
+    close: candles.map((candle) => candle.close),
+  });
+  const last = rows.at(-1)?.adx;
+  return last !== undefined && Number.isFinite(last) ? last : null;
 }
 
 export function emaSlope(candles: Candle[], period = 20, lookback = 5): number | null {

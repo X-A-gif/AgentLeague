@@ -10,7 +10,8 @@ import {
 import WebSocket from "ws";
 import { INTERVALS, SYMBOLS, dataFile, restBase, standDown, wsBase } from "./config.js";
 import { DecisionLog } from "./log.js";
-import { gateExecution, type Limits } from "@aster/risk";
+import { League, runLeagueSymbol, notionalOf } from "./league/run.js";
+import type { LeagueEvent } from "./league/run.js";
 import { PaperBook, type PaperAction, type PaperView } from "./paperBook.js";
 import { runResearch, type Quote, type ResearchPass } from "./research.js";
 
@@ -31,6 +32,7 @@ export type DeskSnapshot = {
   hypotheticalEquity: number;
   equityNote: string;
   paper: PaperView;
+  league: ReturnType<League["view"]>;
   limits: { version: number; values: Record<string, number> } | null;
   rateLimits: Array<{ rateLimitType: string; interval: string; intervalNum: number; limit: number }>;
   symbols: SymbolView[];
@@ -43,6 +45,7 @@ export class ResearchDesk {
   readonly client: PublicAsterClient;
   readonly log: DecisionLog;
   private readonly paper: PaperBook;
+  private readonly league: League;
   private readonly filters = new Map<string, SymbolFilters>();
   private readonly quotes = new Map<string, Quote>();
   private readonly lastPrice = new Map<string, number>();
@@ -60,19 +63,23 @@ export class ResearchDesk {
     this.log = log;
     this.client = client;
     this.paper = new PaperBook(filename);
+    this.league = new League(path.join(path.dirname(filename), "league"));
   }
 
   snapshot(): DeskSnapshot {
     const limits = this.log.activeLimits();
-    const paper = this.paper.view(this.marks());
+    const marks = this.marks();
+    const league = this.league.view(marks);
+    const paper = this.paper.view(marks);
     return {
-      mode: this.paper.mode(),
+      mode: this.league.mode(),
       ordersEnabled: false,
       headTrader: "disabled",
       updatedAt: this.updatedAt,
-      hypotheticalEquity: paper.equity,
-      equityNote: paper.note,
+      hypotheticalEquity: league.equity,
+      equityNote: "Five teams share the same prices, universe, costs, and risk limits. Each starts with 2,000 of a 10,000 paper pool. This is not an Aster balance.",
       paper,
+      league,
       limits: limits ? { version: limits.id, values: limits.limits } : null,
       rateLimits: this.rateLimits,
       symbols: SYMBOLS.map((symbol) => ({
@@ -209,7 +216,33 @@ export class ResearchDesk {
           standDown: standDown(),
         });
         this.passes.set(symbol, pass);
-        this.record(pass, reason, now, filters, quote, limits.limits, limits.id);
+        this.record(pass, reason, now);
+        let depth = null;
+        try {
+          const ladder = await this.client.depth(symbol, 20);
+          depth = {
+            bidNotional: notionalOf(ladder.bids),
+            askNotional: notionalOf(ladder.asks),
+            levels: ladder.bids.length,
+          };
+        } catch {
+          depth = null;
+        }
+        const leagueEvents = runLeagueSymbol({
+          symbol,
+          candles: books,
+          quote,
+          depth,
+          filters,
+          books: this.league.books,
+          limits: limits.limits,
+          limitVersion: limits.id,
+          now,
+          standDown: standDown() || this.league.isHalted() || this.league.mode() !== "paper",
+          marks: this.marks(),
+        });
+        this.league.note(leagueEvents);
+        this.logLeague(leagueEvents, now);
         this.applyQuote(symbol);
       }
       this.updatedAt = now;
@@ -245,11 +278,18 @@ export class ResearchDesk {
   private applyQuote(symbol: string): void {
     const quote = this.quotes.get(symbol);
     if (!quote) return;
-    const actions = this.paper.onQuote(
-      symbol,
-      { mark: quote.mark, fundingRate: quote.fundingRate, nextFundingTime: quote.nextFundingTime },
-      Date.now(),
-    );
+    const actions = [
+      ...this.paper.onQuote(
+        symbol,
+        { mark: quote.mark, fundingRate: quote.fundingRate, nextFundingTime: quote.nextFundingTime },
+        Date.now(),
+      ),
+      ...this.league.onQuote(
+        symbol,
+        { mark: quote.mark, fundingRate: quote.fundingRate, nextFundingTime: quote.nextFundingTime },
+        Date.now(),
+      ),
+    ];
     for (const action of actions) {
       this.log.append({
         ts: Date.now(),
@@ -267,7 +307,7 @@ export class ResearchDesk {
     const quotes = Object.fromEntries(
       [...this.quotes].map(([symbol, quote]) => [symbol, { bid: quote.bid, ask: quote.ask, mark: quote.mark }]),
     );
-    const actions = this.paper.kill(quotes, Date.now());
+    const actions = [...this.paper.kill(quotes, Date.now()), ...this.league.kill(quotes, Date.now())];
     this.logActions(actions);
     this.updatedAt = Date.now();
     return actions;
@@ -275,6 +315,7 @@ export class ResearchDesk {
 
   resume(): void {
     this.paper.resumeToResearch();
+    this.league.resumeToResearch();
     this.log.append({
       ts: Date.now(),
       agent: "operator",
@@ -287,7 +328,8 @@ export class ResearchDesk {
   }
 
   enablePaper(): { ok: boolean; reason: string } {
-    const result = this.paper.enablePaper();
+    const legacy = this.paper.enablePaper();
+    const result = legacy.ok ? this.league.enablePaper() : legacy;
     this.log.append({
       ts: Date.now(),
       agent: "operator",
@@ -317,10 +359,6 @@ export class ResearchDesk {
     pass: ResearchPass,
     reason: string,
     now: number,
-    filters: SymbolFilters,
-    quote: Quote,
-    limits: Limits,
-    limitVersion: number,
   ): void {
     const correlationId = pass.candleOpenTime ? `${pass.symbol}-15m-${pass.candleOpenTime}` : null;
     if (correlationId && this.log.hasCorrelation(correlationId)) return;
@@ -348,108 +386,26 @@ export class ResearchDesk {
       parentIds: [technical.id],
       payload: pass.news,
     });
-    if (pass.decisions.length === 0) {
+    this.log.append({
+      ts: now,
+      agent: "market",
+      kind: "observation",
+      correlationId,
+      parentIds: [news.id],
+      payload: { summary: `${pass.symbol} shared scan is context for the five teams. ${String(pass.technical.summary ?? "")}` },
+    });
+  }
+
+  private logLeague(events: LeagueEvent[], now: number): void {
+    for (const event of events) {
       this.log.append({
         ts: now,
-        agent: "strategy",
-        kind: "observation",
-        correlationId,
-        parentIds: [news.id],
-        payload: { summary: `${pass.symbol}: no ticket. ${String(pass.technical.summary ?? "")}` },
+        agent: event.agent,
+        kind: event.kind,
+        correlationId: event.teamId === "league" ? null : `${event.teamId}-${now}`,
+        parentIds: [],
+        payload: { summary: event.summary, ...event.payload },
       });
-      return;
-    }
-    for (const decision of pass.decisions) {
-      const strategy = this.log.append({
-        ts: now,
-        agent: "strategy",
-        kind: "ticket",
-        correlationId,
-        parentIds: [news.id],
-        payload: {
-          summary: `${decision.ticket.side} ${decision.ticket.setup} on ${decision.ticket.symbol}. Reference entry ${decision.ticket.entry}, stop ${decision.ticket.stop}, target ${decision.ticket.targets[0]}. Not an order.`,
-          ...decision.ticket,
-        },
-      });
-      const risk = this.log.append({
-        ts: now,
-        agent: "risk",
-        kind: "risk_decision",
-        correlationId,
-        parentIds: [strategy.id],
-        payload: {
-          summary:
-            decision.risk.action === "approve"
-              ? `Approved a paper size of ${decision.risk.qty} ${decision.ticket.symbol} at ${decision.risk.leverage}x. No Aster order.`
-              : `Would reject: ${decision.risk.reason}`,
-          action: decision.risk.action,
-          reason: decision.risk.reason,
-          qty: decision.risk.qty,
-          notional: decision.risk.notional,
-          leverage: decision.risk.leverage,
-          riskCash: decision.risk.riskCash,
-          rewardRisk: decision.risk.rewardRisk,
-          limitVersion: decision.risk.limitVersion,
-        },
-      });
-      this.log.append({
-        ts: now,
-        agent: "head",
-        kind: "head_decision",
-        correlationId,
-        parentIds: [risk.id],
-        payload: { summary: decision.headNote, status: "disabled", qty: decision.headQty },
-      });
-      if (decision.risk.action === "approve" && decision.headQty && decision.headQty > 0 && decision.risk.leverage) {
-        const target = decision.ticket.targets[0];
-        if (target === undefined) continue;
-        const gated = gateExecution({
-          decision: decision.risk,
-          qty: decision.headQty,
-          leverage: decision.risk.leverage,
-          stop: decision.ticket.stop,
-          approvedStop: decision.ticket.stop,
-          decidedAt: now,
-          now,
-          activeLimitVersion: limitVersion,
-          halted: this.paper.isHalted(),
-          equity: this.paper.accountState(this.marks(), now).equity,
-          entry: decision.ticket.entry,
-          limits,
-        });
-        if (!gated.ok) {
-          this.log.append({
-            ts: now,
-            agent: "execution",
-            kind: "observation",
-            correlationId,
-            parentIds: [risk.id],
-            payload: { summary: `Paper fill blocked: ${gated.reason}`, code: gated.code },
-          });
-          continue;
-        }
-        const action = this.paper.submitApproved({
-          symbol: decision.ticket.symbol,
-          side: decision.ticket.side,
-          qty: gated.qty,
-          leverage: gated.leverage,
-          stop: decision.ticket.stop,
-          target,
-          bid: quote.bid,
-          ask: quote.ask,
-          filters,
-          now,
-          setup: decision.ticket.setup,
-        });
-        this.log.append({
-          ts: now,
-          agent: "execution",
-          kind: action.kind === "fill" ? "fill" : "observation",
-          correlationId,
-          parentIds: [risk.id],
-          payload: { summary: action.summary, ...action.payload },
-        });
-      }
     }
   }
 }
