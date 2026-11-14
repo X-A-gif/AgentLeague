@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 
 type Decision = {
@@ -110,6 +111,7 @@ export function ResearchBoard() {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [events, setEvents] = useState<FeedEvent[]>([]);
   const [offline, setOffline] = useState<string | null>(null);
+  const [refreshToken, setRefreshToken] = useState(0);
 
   useEffect(() => {
     let stopped = false;
@@ -139,7 +141,7 @@ export function ResearchBoard() {
       stopped = true;
       clearInterval(timer);
     };
-  }, []);
+  }, [refreshToken]);
 
   if (!snapshot && offline) {
     return (
@@ -165,12 +167,26 @@ export function ResearchBoard() {
             is sent to Aster except public market data.
           </p>
         </div>
-        <div className="flex flex-wrap gap-2">
-          <Badge>Paper</Badge>
-          <Badge variant="outline">Aster orders disabled</Badge>
-          <Badge variant="secondary">Head trader off</Badge>
+        <div className="flex flex-col items-start gap-3">
+          <div className="flex flex-wrap gap-2">
+            <Badge variant={snapshot.mode === "halted" ? "destructive" : "default"}>{modeLabel(snapshot.mode)}</Badge>
+            <Badge variant="outline">Aster orders disabled</Badge>
+            <Badge variant="secondary">Head trader off</Badge>
+          </div>
+          <DeskControls mode={snapshot.mode} onChanged={() => setRefreshToken((value) => value + 1)} />
         </div>
       </header>
+      {snapshot.mode === "halted" ? (
+        <Card className="border-destructive/40">
+          <CardHeader>
+            <CardTitle className="text-base">Desk halted</CardTitle>
+            <CardDescription>
+              Paper positions were flattened and resting paper orders were cancelled. New trades stay blocked until you
+              resume. Resume returns to research and does not turn paper back on by itself.
+            </CardDescription>
+          </CardHeader>
+        </Card>
+      ) : null}
 
       {offline || snapshot.error ? (
         <Card className="border-destructive/40">
@@ -302,6 +318,62 @@ function SymbolCard({ view }: { view: SymbolView }) {
       </CardContent>
     </Card>
   );
+}
+
+function DeskControls({ mode, onChanged }: { mode: string; onChanged: () => void }) {
+  const [armed, setArmed] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+
+  async function post(path: string) {
+    setBusy(true);
+    setMessage(null);
+    try {
+      const response = await fetch(path, { method: "POST" });
+      if (!response.ok) {
+        const body = (await response.json()) as { reason?: string };
+        setMessage(body.reason ?? "The desk refused that control.");
+      }
+      onChanged();
+    } catch {
+      setMessage("The desk did not answer.");
+    } finally {
+      setBusy(false);
+      setArmed(false);
+    }
+  }
+
+  return (
+    <div className="flex flex-col items-start gap-2">
+      <div className="flex flex-wrap gap-2">
+        {mode === "halted" ? (
+          <Button disabled={busy} onClick={() => void post("/desk/resume")}>
+            Resume to research
+          </Button>
+        ) : armed ? (
+          <Button variant="destructive" disabled={busy} onClick={() => void post("/desk/kill")}>
+            Confirm flatten
+          </Button>
+        ) : (
+          <Button variant="destructive" disabled={busy} onClick={() => setArmed(true)}>
+            Kill switch
+          </Button>
+        )}
+        {mode === "research" ? (
+          <Button variant="outline" disabled={busy} onClick={() => void post("/desk/paper")}>
+            Enable paper
+          </Button>
+        ) : null}
+      </div>
+      {message ? <p className="text-xs text-destructive">{message}</p> : null}
+    </div>
+  );
+}
+
+function modeLabel(mode: string): string {
+  if (mode === "halted") return "Halted";
+  if (mode === "research") return "Research";
+  return "Paper";
 }
 
 function PaperLists({ paper }: { paper: Snapshot["paper"] }) {

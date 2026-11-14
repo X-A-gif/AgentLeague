@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyHeadDecision, evaluateRisk, type AccountState, type Filters, type Ticket } from "./evaluate.js";
+import { applyHeadDecision, evaluateRisk, gateExecution, type AccountState, type Filters, type Ticket } from "./evaluate.js";
 import { DEFAULT_LIMITS, isLooser, streakFactor } from "./limits.js";
 
 const filters: Filters = {
@@ -78,13 +78,29 @@ describe("risk engine", () => {
     expect(decide({ account: { ...account, consecutiveLosses: 3 } }).reason).toMatch(/Consecutive-loss/);
   });
 
-  it("rejects a missing or wrong-side stop, a poor reward ratio, and a halt", () => {
-    expect(decide({ ticket: ticket({ stop: 101 }) }).reason).toMatch(/below the entry/);
-    expect(decide({ ticket: ticket({ targets: [105] }) }).reason).toMatch(/Reward to risk/);
-    expect(decide({ account: { ...account, halted: true } }).reason).toMatch(/halted/);
-    expect(decide({ account: { ...account, dailyRealizedLoss: 200 } }).reason).toMatch(/Daily loss/);
-    expect(decide({ account: { ...account, drawdownPct: 0.1 } }).reason).toMatch(/Drawdown/);
-    expect(decide({ ticket: ticket({ newsFlag: "stand_down" }) }).reason).toMatch(/stand-down/);
+  it("rejects over-limit trades with stable reason codes", () => {
+    expect(decide({ ticket: ticket({ stop: 101 }) }).code).toBe("MISSING_STOP");
+    expect(decide({ ticket: ticket({ targets: [105] }) }).code).toBe("REWARD_RISK");
+    expect(decide({ ticket: ticket({ stop: 99, targets: [101.5] }) }).code).toBe("POSITION_CAP");
+    expect(decide({ account: { ...account, dailyRealizedLoss: 200 } }).code).toBe("DAILY_LOSS");
+    expect(decide({ account: { ...account, drawdownPct: 0.1 } }).code).toBe("DRAWDOWN");
+    const approved = decide();
+    expect(
+      gateExecution({
+        decision: approved,
+        qty: approved.qty!,
+        leverage: 10,
+        stop: 90,
+        approvedStop: 90,
+        decidedAt: 1_000,
+        now: 1_100,
+        activeLimitVersion: 1,
+        halted: false,
+        equity: 10_000,
+        entry: 100,
+        limits: DEFAULT_LIMITS,
+      }),
+    ).toMatchObject({ ok: false, code: "LEVERAGE" });
   });
 
   it("rejects a market that has run through the mark", () => {
@@ -98,6 +114,22 @@ describe("risk engine", () => {
       qty: 5,
       note: "Head trader asked to increase size. The increase was ignored.",
     });
+    const approved = decide();
+    const gated = gateExecution({
+      decision: approved,
+      qty: 9,
+      leverage: approved.leverage!,
+      stop: 90,
+      approvedStop: 90,
+      decidedAt: 1_000,
+      now: 1_000,
+      activeLimitVersion: 1,
+      halted: false,
+      equity: 10_000,
+      entry: 100,
+      limits: DEFAULT_LIMITS,
+    });
+    expect(gated).toEqual({ ok: true, qty: approved.qty, leverage: approved.leverage });
     expect(applyHeadDecision(5, { status: "disabled" }).qty).toBe(5);
     expect(applyHeadDecision(5, { status: "accept", qty: 2 }).qty).toBe(2);
   });

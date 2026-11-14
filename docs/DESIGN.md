@@ -1,6 +1,6 @@
 # Autonomous trading desk — design
 
-Stages 1 and 2 are implemented: research plus a paper book on live prices. Stages 3–8 are not. The decisions below are the ones accepted for that build.
+Stages 1–3 are implemented: research, a paper book, and a risk gate with a kill switch. Stages 4–8 are not. The decisions below are the ones accepted for that build.
 
 The venue is Aster perpetual futures. The research behind the API choices is in [ASTER_API_NOTES.md](./ASTER_API_NOTES.md), with source links and the responses captured on 2026-11-14. Where Aster's own pages disagree, this design follows the futures V3 reference in [asterdex/api-docs](https://github.com/asterdex/api-docs) and says so.
 

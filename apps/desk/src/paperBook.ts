@@ -155,6 +155,11 @@ export class PaperBook {
         day_net REAL NOT NULL,
         consecutive_losses INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS desk_control (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        halted INTEGER NOT NULL,
+        mode TEXT NOT NULL
+      );
     `);
     const existing = this.db.prepare("SELECT id FROM paper_account WHERE id = 1").get();
     if (!existing) {
@@ -164,6 +169,10 @@ export class PaperBook {
            VALUES (1, ?, ?, ?, 0, 0)`,
         )
         .run(PAPER_STARTING_EQUITY, PAPER_STARTING_EQUITY, utcDay(Date.now()));
+    }
+    const control = this.db.prepare("SELECT id FROM desk_control WHERE id = 1").get();
+    if (!control) {
+      this.db.prepare("INSERT INTO desk_control (id, halted, mode) VALUES (1, 0, 'paper')").run();
     }
   }
 
@@ -237,9 +246,53 @@ export class PaperBook {
       dailyRealizedLoss: Math.max(0, -dayNet),
       consecutiveLosses: account.consecutiveLosses,
       drawdownPct: account.peakEquity > 0 ? Math.max(0, (account.peakEquity - view.equity) / account.peakEquity) : 0,
-      halted: false,
+      halted: this.isHalted(),
       maintenanceMarginRate: 0.005,
     };
+  }
+
+  isHalted(): boolean {
+    return this.control().halted;
+  }
+
+  mode(): "research" | "paper" | "halted" {
+    if (this.isHalted()) return "halted";
+    return this.control().mode;
+  }
+
+  /**
+   * Persist the halt before cancelling or closing anything.
+   * A second call on an already flat book stays halted.
+   */
+  kill(quotes: Record<string, { bid: number; ask: number; mark: number }>, now: number): PaperAction[] {
+    this.db.prepare("UPDATE desk_control SET halted = 1 WHERE id = 1").run();
+    const actions: PaperAction[] = [
+      { kind: "reject", summary: "Kill switch: desk halted. New paper trades are blocked.", payload: { halted: true } },
+    ];
+    this.db.prepare("UPDATE paper_orders SET status = 'CANCELED' WHERE status = 'NEW'").run();
+    for (const position of this.openPositions()) {
+      const quote = quotes[position.symbol] ?? { bid: position.entryPrice, ask: position.entryPrice, mark: position.entryPrice };
+      const exitSide = orderSideFor(position.side, true);
+      const exitPrice = marketFillPrice(exitSide, quote.bid || quote.mark, quote.ask || quote.mark);
+      const fee = feeCash(position.qty * exitPrice, PAPER_TAKER_FEE_RATE);
+      this.closePosition(position, exitPrice, fee, now);
+      actions.push({
+        kind: "fill",
+        summary: `Kill switch closed paper ${position.side} ${position.symbol} at ${round(exitPrice)}.`,
+        payload: { symbol: position.symbol, price: exitPrice },
+      });
+    }
+    return actions;
+  }
+
+  resumeToResearch(): void {
+    this.db.prepare("UPDATE desk_control SET halted = 0, mode = 'research' WHERE id = 1").run();
+  }
+
+  enablePaper(): { ok: boolean; reason: string } {
+    if (this.isHalted()) return { ok: false, reason: "The desk is halted. Resume before enabling paper." };
+    this.db.prepare("UPDATE desk_control SET mode = 'paper' WHERE id = 1").run();
+    return { ok: true, reason: "Paper trading is on." };
   }
 
   submitApproved(input: {
@@ -255,6 +308,15 @@ export class PaperBook {
     now: number;
     setup: string;
   }): PaperAction {
+    if (this.isHalted() || this.mode() !== "paper") {
+      return {
+        kind: "reject",
+        summary: this.isHalted()
+          ? `Paper reject: ${input.symbol} blocked because the desk is halted.`
+          : `Paper reject: ${input.symbol} blocked because the desk is in research mode.`,
+        payload: { symbol: input.symbol, code: this.isHalted() ? "HALTED" : "RESEARCH" },
+      };
+    }
     if (this.hasWorkingEntry(input.symbol, input.side)) {
       return {
         kind: "skip",
@@ -349,6 +411,7 @@ export class PaperBook {
       if (funding) actions.push(funding);
     }
     for (const order of this.openOrders().filter((item) => item.symbol === symbol)) {
+      if (this.isHalted() && !order.reduceOnly) continue;
       const triggered =
         order.type === "LIMIT" && order.price !== null
           ? limitTradedThrough(order.orderSide, order.price, quote.mark)
@@ -554,6 +617,14 @@ export class PaperBook {
     const key = utcDay(now);
     const dayNet = account.dayKey === key ? account.dayNet + delta : delta;
     this.db.prepare("UPDATE paper_account SET day_key = ?, day_net = ? WHERE id = 1").run(key, dayNet);
+  }
+
+  private control(): { halted: boolean; mode: "research" | "paper" } {
+    const row = this.db.prepare("SELECT halted, mode FROM desk_control WHERE id = 1").get() as {
+      halted: number;
+      mode: string;
+    };
+    return { halted: Number(row.halted) === 1, mode: row.mode === "research" ? "research" : "paper" };
   }
 
   private account(): AccountRow {

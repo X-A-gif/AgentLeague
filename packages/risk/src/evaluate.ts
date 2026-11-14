@@ -41,8 +41,28 @@ export type MarketQuote = {
   ask: number;
 };
 
+export type RiskCode =
+  | "OK"
+  | "HALTED"
+  | "STAND_DOWN"
+  | "MISSING_STOP"
+  | "NO_TARGET"
+  | "REWARD_RISK"
+  | "DAILY_LOSS"
+  | "DRAWDOWN"
+  | "LOSS_STREAK"
+  | "SLIPPAGE"
+  | "POSITION_CAP"
+  | "EXPOSURE"
+  | "LEVERAGE"
+  | "MIN_SIZE"
+  | "LIQUIDATION"
+  | "STALE"
+  | "LIMIT_VERSION";
+
 export type RiskDecision = {
   action: "approve" | "reject";
+  code: RiskCode;
   reason: string;
   qty: number | null;
   notional: number | null;
@@ -51,6 +71,7 @@ export type RiskDecision = {
   rewardRisk: number | null;
   streakFactor: number;
   limitVersion: number;
+  decidedAt?: number;
 };
 
 export type HeadDecision =
@@ -59,6 +80,7 @@ export type HeadDecision =
   | { status: "accept"; qty: number };
 
 function reject(
+  code: RiskCode,
   reason: string,
   limitVersion: number,
   factor: number,
@@ -66,6 +88,7 @@ function reject(
 ): RiskDecision {
   return {
     action: "reject",
+    code,
     reason,
     qty: null,
     notional: null,
@@ -101,29 +124,26 @@ export function evaluateRisk(input: {
   const version = input.limitVersion;
   const factor = streakFactor(account.consecutiveLosses, limits.maxConsecutiveLosses);
 
-  if (account.halted) return reject("Desk is halted", version, factor);
-  if (ticket.newsFlag === "stand_down") return reject("News stand-down is on", version, factor);
-  if (!(ticket.entry > 0) || !(ticket.stop > 0)) return reject("Entry and stop must be positive", version, factor);
-  if (ticket.side === "LONG" && !(ticket.stop < ticket.entry)) {
-    return reject("Long stop must sit below the entry", version, factor);
-  }
-  if (ticket.side === "SHORT" && !(ticket.stop > ticket.entry)) {
-    return reject("Short stop must sit above the entry", version, factor);
+  if (account.halted) return reject("HALTED", "Desk is halted", version, factor);
+  if (ticket.newsFlag === "stand_down") return reject("STAND_DOWN", "News stand-down is on", version, factor);
+  const stopOnCorrectSide = ticket.side === "LONG" ? ticket.stop < ticket.entry : ticket.stop > ticket.entry;
+  if (!(ticket.entry > 0) || !(ticket.stop > 0) || !stopOnCorrectSide) {
+    return reject("MISSING_STOP", "A stop on the correct side of the entry is required", version, factor);
   }
   if (account.dailyRealizedLoss >= account.equity * limits.maxDailyLossPct) {
-    return reject("Daily loss limit reached", version, factor);
+    return reject("DAILY_LOSS", "Daily loss limit reached", version, factor);
   }
   if (account.drawdownPct >= limits.maxDrawdownPct) {
-    return reject("Drawdown limit reached", version, factor);
+    return reject("DRAWDOWN", "Drawdown limit reached", version, factor);
   }
-  if (factor === 0) return reject("Consecutive-loss limit reached", version, factor);
+  if (factor === 0) return reject("LOSS_STREAK", "Consecutive-loss limit reached", version, factor);
 
   const target = ticket.targets[0];
-  if (target === undefined) return reject("Ticket has no target", version, factor);
+  if (target === undefined) return reject("NO_TARGET", "Ticket has no target", version, factor);
   const stopDistance = Math.abs(ticket.entry - ticket.stop);
   const rewardRisk = Math.abs(target - ticket.entry) / stopDistance;
   if (rewardRisk < limits.minRewardRisk) {
-    return reject(`Reward to risk ${rewardRisk.toFixed(2)} is below ${limits.minRewardRisk}`, version, factor, {
+    return reject("REWARD_RISK", `Reward to risk ${rewardRisk.toFixed(2)} is below ${limits.minRewardRisk}`, version, factor, {
       rewardRisk,
     });
   }
@@ -132,7 +152,7 @@ export function evaluateRisk(input: {
     const adverse = ticket.side === "LONG" ? quote.ask - quote.mark : quote.mark - quote.bid;
     const bps = (adverse / quote.mark) * 10_000;
     if (!(quote.mark > 0) || bps > limits.slippageAbortBps) {
-      return reject(`Market is ${bps.toFixed(1)} bps through the mark`, version, factor, { rewardRisk });
+      return reject("SLIPPAGE", `Market is ${bps.toFixed(1)} bps through the mark`, version, factor, { rewardRisk });
     }
   }
 
@@ -141,13 +161,11 @@ export function evaluateRisk(input: {
   let notional = qty * ticket.entry;
   const positionCap = account.equity * limits.maxPositionNotionalPct;
   const exposureRoom = account.equity * limits.maxGrossExposurePct - account.grossExposure;
-  const notionalCap = Math.min(positionCap, exposureRoom);
-  if (!(notionalCap > 0)) {
-    return reject("Portfolio exposure cap leaves no room", version, factor, { riskCash, rewardRisk });
+  if (notional > positionCap) {
+    return reject("POSITION_CAP", "Position notional is above the cap", version, factor, { riskCash, rewardRisk });
   }
-  if (notional > notionalCap) {
-    notional = notionalCap;
-    qty = notional / ticket.entry;
+  if (!(exposureRoom > 0) || notional > exposureRoom) {
+    return reject("EXPOSURE", "Portfolio exposure cap leaves no room", version, factor, { riskCash, rewardRisk });
   }
 
   const leverage = limits.maxLeverage;
@@ -166,17 +184,18 @@ export function evaluateRisk(input: {
   qty = floorToStep(qty, filters.stepSize);
   notional = qty * ticket.entry;
   if (qty < filters.minQty || notional < filters.minNotional) {
-    return reject("Sized quantity is below the exchange minimum", version, factor, { riskCash, rewardRisk });
+    return reject("MIN_SIZE", "Sized quantity is below the exchange minimum", version, factor, { riskCash, rewardRisk });
   }
 
   const liquidation = estimatedLiquidation(ticket.entry, ticket.side, leverage, account.maintenanceMarginRate);
   const stopBeyondLiquidation = ticket.side === "LONG" ? ticket.stop <= liquidation : ticket.stop >= liquidation;
   if (stopBeyondLiquidation) {
-    return reject("Stop is beyond the estimated liquidation", version, factor, { riskCash, rewardRisk });
+    return reject("LIQUIDATION", "Stop is beyond the estimated liquidation", version, factor, { riskCash, rewardRisk });
   }
 
   return {
     action: "approve",
+    code: "OK",
     reason: "Within the confirmed risk limits",
     qty,
     notional,
@@ -186,6 +205,51 @@ export function evaluateRisk(input: {
     streakFactor: factor,
     limitVersion: version,
   };
+}
+
+export const RISK_DECISION_TTL_MS = 30_000;
+
+/**
+ * Last check before a paper fill. A larger size or a higher leverage than the
+ * risk decision is not executed. A stale decision or an old limit version is rejected.
+ */
+export function gateExecution(input: {
+  decision: RiskDecision;
+  qty: number;
+  leverage: number;
+  stop: number;
+  approvedStop: number;
+  decidedAt: number;
+  now: number;
+  activeLimitVersion: number;
+  halted: boolean;
+  equity: number;
+  entry: number;
+  limits: Limits;
+}): { ok: true; qty: number; leverage: number } | { ok: false; code: RiskCode; reason: string } {
+  if (input.halted || input.decision.code === "HALTED") {
+    return { ok: false, code: "HALTED", reason: "Desk is halted" };
+  }
+  if (!(input.stop > 0) || input.stop !== input.approvedStop) {
+    return { ok: false, code: "MISSING_STOP", reason: "Stop does not match the approved ticket" };
+  }
+  if (input.now - input.decidedAt > RISK_DECISION_TTL_MS) {
+    return { ok: false, code: "STALE", reason: "Risk approval expired" };
+  }
+  if (input.decision.limitVersion !== input.activeLimitVersion) {
+    return { ok: false, code: "LIMIT_VERSION", reason: "Risk limits changed since the decision" };
+  }
+  if (input.decision.action !== "approve" || input.decision.qty === null || input.decision.leverage === null) {
+    return { ok: false, code: input.decision.code, reason: input.decision.reason };
+  }
+  if (input.leverage > input.limits.maxLeverage || input.decision.leverage > input.limits.maxLeverage) {
+    return { ok: false, code: "LEVERAGE", reason: "Leverage is above the confirmed maximum" };
+  }
+  const qty = Math.min(input.qty, input.decision.qty);
+  if (qty * input.entry > input.equity * input.limits.maxPositionNotionalPct) {
+    return { ok: false, code: "POSITION_CAP", reason: "Position notional is above the cap" };
+  }
+  return { ok: true, qty, leverage: input.decision.leverage };
 }
 
 /** The head trader can reject or shrink a risk-approved size. A larger size is ignored. */

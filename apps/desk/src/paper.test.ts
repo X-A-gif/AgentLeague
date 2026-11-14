@@ -156,6 +156,54 @@ describe("paper trading", () => {
     book.close();
   });
 
+  it("kill switch flattens a position, cancels a resting order, and blocks the next fill", () => {
+    const book = tempBook();
+    book.submitApproved({
+      symbol: "BTCUSDT",
+      side: "LONG",
+      qty: 0.1,
+      leverage: 3,
+      stop: 90,
+      target: 120,
+      bid: 100,
+      ask: 100,
+      filters,
+      now: 1_000,
+      setup: "test",
+    });
+    book.placeLimit({
+      symbol: "ETHUSDT",
+      positionSide: "LONG",
+      orderSide: "BUY",
+      qty: 0.1,
+      price: 90,
+      filters,
+      now: 1_000,
+    });
+    expect(book.view({}).orders.length).toBeGreaterThan(0);
+    book.kill({ BTCUSDT: { bid: 100, ask: 101, mark: 100.5 } }, 2_000);
+    const flat = book.view({});
+    expect(flat.positions).toHaveLength(0);
+    expect(flat.orders).toHaveLength(0);
+    expect(book.isHalted()).toBe(true);
+    const blocked = book.submitApproved({
+      symbol: "BTCUSDT",
+      side: "LONG",
+      qty: 0.1,
+      leverage: 3,
+      stop: 90,
+      target: 120,
+      bid: 100,
+      ask: 100,
+      filters,
+      now: 3_000,
+      setup: "after-kill",
+    });
+    expect(blocked.kind).toBe("reject");
+    expect(book.view({}).positions).toHaveLength(0);
+    book.close();
+  });
+
   it("reopens an open paper position from the same file", () => {
     const file = path.join(mkdtempSync(path.join(tmpdir(), "paper-")), "book.sqlite");
     const first = new PaperBook(file);

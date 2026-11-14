@@ -10,7 +10,8 @@ import {
 import WebSocket from "ws";
 import { INTERVALS, SYMBOLS, dataFile, restBase, standDown, wsBase } from "./config.js";
 import { DecisionLog } from "./log.js";
-import { PaperBook, type PaperView } from "./paperBook.js";
+import { gateExecution, type Limits } from "@aster/risk";
+import { PaperBook, type PaperAction, type PaperView } from "./paperBook.js";
 import { runResearch, type Quote, type ResearchPass } from "./research.js";
 
 export type SymbolView = {
@@ -23,7 +24,7 @@ export type SymbolView = {
 };
 
 export type DeskSnapshot = {
-  mode: "paper";
+  mode: "research" | "paper" | "halted";
   ordersEnabled: false;
   headTrader: "disabled";
   updatedAt: number | null;
@@ -65,7 +66,7 @@ export class ResearchDesk {
     const limits = this.log.activeLimits();
     const paper = this.paper.view(this.marks());
     return {
-      mode: "paper",
+      mode: this.paper.mode(),
       ordersEnabled: false,
       headTrader: "disabled",
       updatedAt: this.updatedAt,
@@ -208,7 +209,7 @@ export class ResearchDesk {
           standDown: standDown(),
         });
         this.passes.set(symbol, pass);
-        this.record(pass, reason, now, filters, quote);
+        this.record(pass, reason, now, filters, quote, limits.limits, limits.id);
         this.applyQuote(symbol);
       }
       this.updatedAt = now;
@@ -262,12 +263,64 @@ export class ResearchDesk {
     if (actions.length > 0) this.updatedAt = Date.now();
   }
 
+  kill(): PaperAction[] {
+    const quotes = Object.fromEntries(
+      [...this.quotes].map(([symbol, quote]) => [symbol, { bid: quote.bid, ask: quote.ask, mark: quote.mark }]),
+    );
+    const actions = this.paper.kill(quotes, Date.now());
+    this.logActions(actions);
+    this.updatedAt = Date.now();
+    return actions;
+  }
+
+  resume(): void {
+    this.paper.resumeToResearch();
+    this.log.append({
+      ts: Date.now(),
+      agent: "operator",
+      kind: "config_change",
+      correlationId: null,
+      parentIds: [],
+      payload: { summary: "Halt cleared. Desk is in research mode and will not paper-fill." },
+    });
+    this.updatedAt = Date.now();
+  }
+
+  enablePaper(): { ok: boolean; reason: string } {
+    const result = this.paper.enablePaper();
+    this.log.append({
+      ts: Date.now(),
+      agent: "operator",
+      kind: "config_change",
+      correlationId: null,
+      parentIds: [],
+      payload: { summary: result.reason },
+    });
+    this.updatedAt = Date.now();
+    return result;
+  }
+
+  private logActions(actions: PaperAction[]): void {
+    for (const action of actions) {
+      this.log.append({
+        ts: Date.now(),
+        agent: "execution",
+        kind: action.kind === "fill" ? "fill" : "halt",
+        correlationId: null,
+        parentIds: [],
+        payload: { summary: action.summary, ...action.payload },
+      });
+    }
+  }
+
   private record(
     pass: ResearchPass,
     reason: string,
     now: number,
     filters: SymbolFilters,
     quote: Quote,
+    limits: Limits,
+    limitVersion: number,
   ): void {
     const correlationId = pass.candleOpenTime ? `${pass.symbol}-15m-${pass.candleOpenTime}` : null;
     if (correlationId && this.log.hasCorrelation(correlationId)) return;
@@ -350,11 +403,36 @@ export class ResearchDesk {
       if (decision.risk.action === "approve" && decision.headQty && decision.headQty > 0 && decision.risk.leverage) {
         const target = decision.ticket.targets[0];
         if (target === undefined) continue;
+        const gated = gateExecution({
+          decision: decision.risk,
+          qty: decision.headQty,
+          leverage: decision.risk.leverage,
+          stop: decision.ticket.stop,
+          approvedStop: decision.ticket.stop,
+          decidedAt: now,
+          now,
+          activeLimitVersion: limitVersion,
+          halted: this.paper.isHalted(),
+          equity: this.paper.accountState(this.marks(), now).equity,
+          entry: decision.ticket.entry,
+          limits,
+        });
+        if (!gated.ok) {
+          this.log.append({
+            ts: now,
+            agent: "execution",
+            kind: "observation",
+            correlationId,
+            parentIds: [risk.id],
+            payload: { summary: `Paper fill blocked: ${gated.reason}`, code: gated.code },
+          });
+          continue;
+        }
         const action = this.paper.submitApproved({
           symbol: decision.ticket.symbol,
           side: decision.ticket.side,
-          qty: decision.headQty,
-          leverage: decision.risk.leverage,
+          qty: gated.qty,
+          leverage: gated.leverage,
           stop: decision.ticket.stop,
           target,
           bid: quote.bid,
