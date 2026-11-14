@@ -1,6 +1,6 @@
 # Autonomous trading desk — design
 
-Stage 0 only. This document is the design for review. No application code has been written.
+Stage 1, research mode, is implemented. Stages 2–8 are not. The decisions below are the ones accepted for that build.
 
 The venue is Aster perpetual futures. The research behind the API choices is in [ASTER_API_NOTES.md](./ASTER_API_NOTES.md), with source links and the responses captured on 2026-11-14. Where Aster's own pages disagree, this design follows the futures V3 reference in [asterdex/api-docs](https://github.com/asterdex/api-docs) and says so.
 

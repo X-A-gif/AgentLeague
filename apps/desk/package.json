@@ -1,0 +1,19 @@
+{
+  "name": "@aster/desk",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --experimental-sqlite --import tsx src/index.ts",
+    "start": "node --experimental-sqlite --import tsx src/index.ts"
+  },
+  "dependencies": {
+    "@aster/client": "*",
+    "@aster/risk": "*",
+    "technicalindicators": "^3.1.0",
+    "ws": "^8.23.0"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.18.1"
+  }
+}

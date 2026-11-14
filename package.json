@@ -1,0 +1,23 @@
+{
+  "name": "aster-desk",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:desk": "npm run dev -w @aster/desk",
+    "dev:web": "npm run dev -w @aster/web",
+    "test": "NODE_OPTIONS='--experimental-sqlite' vitest run",
+    "lint": "npm run lint -w @aster/web"
+  },
+  "devDependencies": {
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3",
+    "vitest": "^5.1.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

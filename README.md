@@ -1,20 +1,28 @@
-# Aster trading desk
+# Aster research desk
 
-Stage 0 is a design for a single-operator desk that researches crypto perpetuals and, later, trades them on Aster. The dashboard and the worker are not built yet. Review the design before any application code.
+A single-operator desk for Aster USDT-margined perpetuals. This build is **research mode only**. It reads public market data for BTCUSDT and ETHUSDT, calculates indicators, writes an append-only decision log, and shows what the risk engine would do. It does not connect a wallet and it cannot place, cancel, transfer, or withdraw.
 
-- [Design](docs/DESIGN.md) — architecture, stack, agents, MetaMask, Aster, security, and the staged build.
-- [Aster API notes](docs/ASTER_API_NOTES.md) — what the official docs say, what a live public call returned on 2026-11-14, and what is still unresolved.
+The design is in [docs/DESIGN.md](docs/DESIGN.md). Verified API notes are in [docs/ASTER_API_NOTES.md](docs/ASTER_API_NOTES.md).
 
-## Check the public API
+## Run
 
-No key and no wallet:
+Requires Node 22.
+
+```bash
+npm install
+npm test
+npm run dev:desk
+npm run dev:web
+```
+
+The desk listens on [http://127.0.0.1:47221](http://127.0.0.1:47221). The research page is [http://127.0.0.1:47223](http://127.0.0.1:47223).
+
+`STAND_DOWN=1 npm run dev:desk` keeps the news flag at stand-down, so the strategy agent emits no tickets.
+
+## Check Aster's public API
 
 ```bash
 python3 scripts/verify_aster_public.py
 ```
 
-The script calls Aster's public futures market-data endpoints and one public mark-price websocket. It prints a JSON report and exits 0 when those checks return HTTP 200 or a websocket `101`.
-
-## What this stage does not do
-
-It does not place orders, ask for a seed phrase, or start a web server. Live trading stays out of the product until the later stage described in the design, and it stays off by default even then.
+No key and no wallet. The script calls public futures endpoints only.
