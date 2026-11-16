@@ -7,7 +7,7 @@ import { describe, expect, it } from "vitest";
 import type { Features } from "../features.js";
 import { PaperBook } from "../paperBook.js";
 import type { Quote } from "../research.js";
-import { League, LEAGUE_TEAM_CAPITAL, runLeagueSymbol } from "./run.js";
+import { League, LEAGUE_TEAM_CAPITAL, runLeagueSymbol, withSizeReasoning } from "./run.js";
 import { PROPOSERS, proposeAlpha, proposeGamma } from "./strategies.js";
 import { TEAMS, type SharedMarket, type TeamId } from "./types.js";
 
@@ -34,6 +34,20 @@ const quote: Quote = {
   bid: 99.99,
   ask: 100.01,
 };
+
+describe("size reasoning", () => {
+  it("records the risk budget and the capped size", () => {
+    expect(withSizeReasoning("Gamma long.", { uncappedQty: 0.739, qty: 0.11, code: "OK" })).toBe(
+      "Gamma long. Risk size 0.739, capped size 0.11.",
+    );
+    expect(withSizeReasoning("Gamma long.", { uncappedQty: 10, qty: null, code: "MIN_SIZE" })).toBe(
+      "Gamma long. Risk size 10, capped size below the exchange minimum.",
+    );
+    expect(withSizeReasoning("No size yet.", { uncappedQty: null, qty: null, code: "MISSING_STOP" })).toBe(
+      "No size yet.",
+    );
+  });
+});
 
 describe("league strategies", () => {
   it("keeps five distinct strategy versions", () => {

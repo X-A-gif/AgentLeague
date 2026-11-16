@@ -33,7 +33,12 @@ export function startServer(desk: ResearchDesk, log: DecisionLog): http.Server {
       return;
     }
     if (url.pathname === "/health") {
-      send(response, 200, { ok: true, mode: desk.snapshot().mode, ordersEnabled: false });
+      send(response, 200, {
+        ok: true,
+        mode: desk.snapshot().mode,
+        ordersEnabled: false,
+        lastScanAt: desk.lastScanAt(),
+      });
       return;
     }
     if (url.pathname === "/snapshot") {

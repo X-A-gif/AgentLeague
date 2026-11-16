@@ -81,7 +81,6 @@ describe("risk engine", () => {
   it("rejects over-limit trades with stable reason codes", () => {
     expect(decide({ ticket: ticket({ stop: 101 }) }).code).toBe("MISSING_STOP");
     expect(decide({ ticket: ticket({ targets: [105] }) }).code).toBe("REWARD_RISK");
-    expect(decide({ ticket: ticket({ stop: 99, targets: [101.5] }) }).code).toBe("POSITION_CAP");
     expect(decide({ account: { ...account, dailyRealizedLoss: 200 } }).code).toBe("DAILY_LOSS");
     expect(decide({ account: { ...account, drawdownPct: 0.1 } }).code).toBe("DRAWDOWN");
     const approved = decide();
@@ -101,6 +100,50 @@ describe("risk engine", () => {
         limits: DEFAULT_LIMITS,
       }),
     ).toMatchObject({ ok: false, code: "LEVERAGE" });
+  });
+
+  it("clips a tight stop to the position cap and still vetoes an unclipped size", () => {
+    const clipped = decide({
+      account: { ...account, equity: 2_000, availableMargin: 2_000 },
+      ticket: ticket({ entry: 1817.51, stop: 1803.98, targets: [1850] }),
+    });
+    const cap = 2_000 * 0.1;
+    expect(clipped.action).toBe("approve");
+    expect(clipped.code).toBe("OK");
+    expect(clipped.uncappedQty! * 1817.51).toBeGreaterThan(cap);
+    expect(clipped.qty! * 1817.51).toBeLessThanOrEqual(cap + 1e-6);
+    expect(clipped.qty!).toBeLessThan(clipped.uncappedQty!);
+    expect(clipped.qty!).toBeLessThanOrEqual(clipped.uncappedQty!);
+
+    const unclipped = gateExecution({
+      decision: { ...clipped, qty: clipped.uncappedQty, notional: clipped.uncappedQty! * 1817.51 },
+      qty: clipped.uncappedQty!,
+      leverage: clipped.leverage!,
+      stop: 1803.98,
+      approvedStop: 1803.98,
+      decidedAt: 1_000,
+      now: 1_000,
+      activeLimitVersion: 1,
+      halted: false,
+      equity: 2_000,
+      entry: 1817.51,
+      limits: DEFAULT_LIMITS,
+    });
+    expect(unclipped).toMatchObject({ ok: false, code: "POSITION_CAP" });
+  });
+
+  it("skips a ticket whose capped size is below the exchange minimum", () => {
+    const skipped = decide({
+      account: { ...account, equity: 2_000, availableMargin: 2_000 },
+      filters: { ...filters, minNotional: 500 },
+      ticket: ticket({ entry: 100, stop: 99, targets: [101.5] }),
+    });
+    expect(skipped.action).toBe("reject");
+    expect(skipped.code).toBe("MIN_SIZE");
+    expect(skipped.qty).toBeNull();
+    expect(skipped.uncappedQty).toBe(10);
+    expect(skipped.reason).toMatch(/exchange minimum/);
+    expect(skipped.reason).toMatch(/Risk size 10/);
   });
 
   it("rejects a market that has run through the mark", () => {

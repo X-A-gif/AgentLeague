@@ -69,6 +69,8 @@ export type RiskDecision = {
   leverage: number | null;
   riskCash: number | null;
   rewardRisk: number | null;
+  /** Quantity from the risk budget before position, exposure, and leverage caps. */
+  uncappedQty: number | null;
   streakFactor: number;
   limitVersion: number;
   decidedAt?: number;
@@ -95,6 +97,7 @@ function reject(
     leverage: null,
     riskCash: extra.riskCash ?? null,
     rewardRisk: extra.rewardRisk ?? null,
+    uncappedQty: extra.uncappedQty ?? null,
     streakFactor: factor,
     limitVersion,
   };
@@ -157,23 +160,35 @@ export function evaluateRisk(input: {
   }
 
   const riskCash = account.equity * limits.riskPerTrade * factor;
-  let qty = riskCash / stopDistance;
+  const uncappedQty = riskCash / stopDistance;
+  let qty = uncappedQty;
   let notional = qty * ticket.entry;
   const positionCap = account.equity * limits.maxPositionNotionalPct;
-  const exposureRoom = account.equity * limits.maxGrossExposurePct - account.grossExposure;
   if (notional > positionCap) {
-    return reject("POSITION_CAP", "Position notional is above the cap", version, factor, { riskCash, rewardRisk });
+    notional = positionCap;
+    qty = ticket.entry > 0 ? notional / ticket.entry : 0;
   }
-  if (!(exposureRoom > 0) || notional > exposureRoom) {
-    return reject("EXPOSURE", "Portfolio exposure cap leaves no room", version, factor, { riskCash, rewardRisk });
+  const exposureRoom = account.equity * limits.maxGrossExposurePct - account.grossExposure;
+  if (!(exposureRoom > 0)) {
+    return reject("EXPOSURE", "Portfolio exposure cap leaves no room", version, factor, {
+      riskCash,
+      rewardRisk,
+      uncappedQty,
+    });
+  }
+  if (notional > exposureRoom) {
+    notional = exposureRoom;
+    qty = ticket.entry > 0 ? notional / ticket.entry : 0;
   }
 
   const leverage = limits.maxLeverage;
   const margin = notional / leverage;
   if (margin > account.availableMargin) {
-    notional = account.availableMargin * leverage;
-    qty = notional / ticket.entry;
+    notional = Math.max(0, account.availableMargin) * leverage;
+    qty = ticket.entry > 0 ? notional / ticket.entry : 0;
   }
+  if (qty > uncappedQty) qty = uncappedQty;
+  notional = qty * ticket.entry;
 
   const maxQty = ticket.entryType === "MARKET" ? filters.marketMaxQty : filters.maxQty;
   if (maxQty > 0 && qty > maxQty) {
@@ -183,14 +198,24 @@ export function evaluateRisk(input: {
 
   qty = floorToStep(qty, filters.stepSize);
   notional = qty * ticket.entry;
-  if (qty < filters.minQty || notional < filters.minNotional) {
-    return reject("MIN_SIZE", "Sized quantity is below the exchange minimum", version, factor, { riskCash, rewardRisk });
+  if (!(qty > 0) || qty < filters.minQty || notional < filters.minNotional) {
+    return reject(
+      "MIN_SIZE",
+      `Sized quantity is below the exchange minimum. Risk size ${uncappedQty}, capped size ${qty}.`,
+      version,
+      factor,
+      { riskCash, rewardRisk, uncappedQty },
+    );
   }
 
   const liquidation = estimatedLiquidation(ticket.entry, ticket.side, leverage, account.maintenanceMarginRate);
   const stopBeyondLiquidation = ticket.side === "LONG" ? ticket.stop <= liquidation : ticket.stop >= liquidation;
   if (stopBeyondLiquidation) {
-    return reject("LIQUIDATION", "Stop is beyond the estimated liquidation", version, factor, { riskCash, rewardRisk });
+    return reject("LIQUIDATION", "Stop is beyond the estimated liquidation", version, factor, {
+      riskCash,
+      rewardRisk,
+      uncappedQty,
+    });
   }
 
   return {
@@ -202,6 +227,7 @@ export function evaluateRisk(input: {
     leverage,
     riskCash,
     rewardRisk,
+    uncappedQty,
     streakFactor: factor,
     limitVersion: version,
   };

@@ -132,7 +132,7 @@ function executeProposal(
     teamId: proposal.teamId,
     strategyId: proposal.strategyId,
     strategyVersion: proposal.strategyVersion,
-    reasoning: proposal.reasoning,
+    reasoning: withSizeReasoning(proposal.reasoning, decision),
     confidence: proposal.confidence,
     indicators: proposal.indicators,
     side: proposal.side,
@@ -141,23 +141,27 @@ function executeProposal(
     targets: proposal.targets,
     expectedRewardRisk: decision.rewardRisk,
     code: decision.code,
+    riskQty: decision.uncappedQty,
+    cappedQty: decision.qty,
   };
   const events: LeagueEvent[] = [
     {
       teamId: proposal.teamId,
       agent: proposal.teamId,
       kind: "ticket",
-      summary: proposal.reasoning,
+      summary: reasoning.reasoning,
       payload: reasoning,
     },
     {
       teamId: proposal.teamId,
       agent: "risk",
       kind: "risk_decision",
-      summary:
+      summary: withSizeReasoning(
         decision.action === "approve"
           ? `${proposal.teamId} risk approved paper qty ${decision.qty} at ${decision.leverage}x. Code ${decision.code}.`
           : `${proposal.teamId} risk veto ${decision.code}: ${decision.reason}`,
+        decision,
+      ),
       payload: { ...reasoning, qty: decision.qty, leverage: decision.leverage, action: decision.action },
     },
   ];
@@ -218,6 +222,21 @@ function executeProposal(
     payload: { ...action.payload, ...reasoning, qty: gated.qty, leverage: gated.leverage },
   });
   return events;
+}
+
+export function withSizeReasoning(
+  reasoning: string,
+  decision: { uncappedQty: number | null; qty: number | null; code: string },
+): string {
+  if (decision.uncappedQty === null) return reasoning;
+  if (decision.qty === null) {
+    return `${reasoning} Risk size ${formatQty(decision.uncappedQty)}, capped size below the exchange minimum.`;
+  }
+  return `${reasoning} Risk size ${formatQty(decision.uncappedQty)}, capped size ${formatQty(decision.qty)}.`;
+}
+
+function formatQty(value: number): string {
+  return String(Number(value.toFixed(8)));
 }
 
 export function portfolioGross(books: Record<TeamId, PaperBook>, marks: Record<string, number>): number {

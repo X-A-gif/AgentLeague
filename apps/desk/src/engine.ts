@@ -14,6 +14,14 @@ import { League, runLeagueSymbol, notionalOf } from "./league/run.js";
 import type { LeagueEvent } from "./league/run.js";
 import { PaperBook, type PaperAction, type PaperView } from "./paperBook.js";
 import { runResearch, type Quote, type ResearchPass } from "./research.js";
+import {
+  CLOCK_JUMP_MS,
+  FIFTEEN_MINUTES_MS,
+  STREAM_STALE_MS,
+  ScanScheduler,
+  crossedBoundary,
+  isScanKline,
+} from "./schedule.js";
 
 export type SymbolView = {
   symbol: string;
@@ -53,11 +61,19 @@ export class ResearchDesk {
   private readonly passes = new Map<string, ResearchPass>();
   private rateLimits: DeskSnapshot["rateLimits"] = [];
   private updatedAt: number | null = null;
+  private scanAt: number | null = null;
+  private lastScheduledBucket: number | null = null;
   private error: string | null = null;
   private refreshing: Promise<void> | null = null;
+  private scanQueued: string | null = null;
   private socket: WebSocket | null = null;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private watchTimer: ReturnType<typeof setInterval> | null = null;
+  private scheduler: ScanScheduler | null = null;
   private stopped = false;
   private reconnectDelay = 1_000;
+  private lastMessageAt = 0;
+  private lastClock = 0;
 
   constructor(log: DecisionLog, client = new PublicAsterClient(restBase()), filename = dataFile()) {
     this.log = log;
@@ -94,40 +110,87 @@ export class ResearchDesk {
     };
   }
 
+  lastScanAt(): number | null {
+    return this.scanAt;
+  }
+
   async start(): Promise<void> {
     await this.refresh("startup");
+    this.lastClock = Date.now();
+    this.scheduler = new ScanScheduler((reason) => {
+      void this.refresh(reason);
+    });
+    this.scheduler.start();
+    this.watchTimer = setInterval(() => this.watchStream(), 5_000);
     this.connect();
   }
 
   stop(): void {
     this.stopped = true;
-    this.socket?.close();
+    this.scheduler?.stop();
+    if (this.watchTimer) clearInterval(this.watchTimer);
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.watchTimer = null;
+    this.reconnectTimer = null;
+    this.socket?.terminate();
+    this.socket = null;
   }
 
   private connect(): void {
     if (this.stopped) return;
+    if (this.socket && (this.socket.readyState === WebSocket.OPEN || this.socket.readyState === WebSocket.CONNECTING)) {
+      return;
+    }
     const streams = SYMBOLS.flatMap((symbol) => {
       const lower = symbol.toLowerCase();
-      return [`${lower}@kline_1m`, `${lower}@markPrice@1s`, `${lower}@bookTicker`];
+      return [`${lower}@kline_1m`, `${lower}@kline_15m`, `${lower}@markPrice@1s`, `${lower}@bookTicker`];
     });
     const socket = new WebSocket(marketStreamUrl(wsBase(), streams));
     this.socket = socket;
     socket.on("message", (raw) => {
+      this.lastMessageAt = Date.now();
       this.onMessage(raw.toString());
     });
     socket.on("open", () => {
       this.reconnectDelay = 1_000;
+      this.lastMessageAt = Date.now();
       this.error = null;
     });
     socket.on("close", () => {
-      if (this.stopped) return;
-      const wait = this.reconnectDelay;
-      this.reconnectDelay = Math.min(this.reconnectDelay * 2, 30_000);
-      setTimeout(() => this.connect(), wait);
+      if (this.socket === socket) this.socket = null;
+      this.scheduleReconnect();
     });
     socket.on("error", (error) => {
       this.error = error.message;
     });
+  }
+
+  private scheduleReconnect(): void {
+    if (this.stopped || this.reconnectTimer) return;
+    const wait = this.reconnectDelay;
+    this.reconnectDelay = Math.min(this.reconnectDelay * 2, 30_000);
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      this.connect();
+    }, wait);
+  }
+
+  private dropSocket(): void {
+    const socket = this.socket;
+    this.socket = null;
+    socket?.terminate();
+  }
+
+  private watchStream(): void {
+    const now = Date.now();
+    const previous = this.lastClock || now;
+    this.lastClock = now;
+    if (now - previous > CLOCK_JUMP_MS) {
+      this.dropSocket();
+      if (crossedBoundary(previous, now)) void this.refresh("clock-jump");
+    }
+    const quiet = this.lastMessageAt > 0 && now - this.lastMessageAt > STREAM_STALE_MS;
+    if (this.socket && this.socket.readyState === WebSocket.OPEN && quiet) this.dropSocket();
   }
 
   private onMessage(raw: string): void {
@@ -159,25 +222,30 @@ export class ResearchDesk {
       this.quotes.set(symbol, { ...current, bid: Number(event.b), ask: Number(event.a) });
     } else if (event.e === "kline") {
       const kline = event.k as Record<string, unknown> | undefined;
-      if (!kline || kline.x !== true || kline.i !== "1m") return;
-      const symbol = String(kline.s ?? event.s);
-      this.lastPrice.set(symbol, Number(kline.c));
-      const open = Number(kline.t);
-      if (new Date(open).getUTCMinutes() % 15 === 14) {
-        void this.refresh("15m-close");
-      }
+      if (!kline) return;
+      if (kline.c !== undefined) this.lastPrice.set(String(kline.s ?? event.s), Number(kline.c));
+      if (isScanKline(kline)) void this.refresh("15m-close");
     }
   }
 
-  private async refresh(reason: string): Promise<void> {
-    if (this.refreshing) return this.refreshing;
-    this.refreshing = this.refreshNow(reason).finally(() => {
+  private refresh(reason: string): Promise<void> {
+    if (this.refreshing) {
+      this.scanQueued = reason;
+      return this.refreshing;
+    }
+    const run = this.refreshNow(reason).finally(() => {
       this.refreshing = null;
+      const queued = this.scanQueued;
+      this.scanQueued = null;
+      if (queued && !this.stopped) void this.refresh(queued);
     });
-    return this.refreshing;
+    this.refreshing = run;
+    return run;
   }
 
   private async refreshNow(reason: string): Promise<void> {
+    const bucket = Math.floor(Date.now() / FIFTEEN_MINUTES_MS);
+    if (reason !== "startup" && this.lastScheduledBucket === bucket) return;
     try {
       const info = await this.client.exchangeInfo(SYMBOLS);
       this.rateLimits = info.rateLimits;
@@ -246,7 +314,10 @@ export class ResearchDesk {
         this.applyQuote(symbol);
       }
       this.updatedAt = now;
+      this.scanAt = now;
+      this.lastScheduledBucket = bucket;
       this.error = null;
+      console.log(`scan ${reason} ${new Date(now).toISOString()}`);
     } catch (error) {
       this.error = error instanceof Error ? error.message : String(error);
       this.log.append({
